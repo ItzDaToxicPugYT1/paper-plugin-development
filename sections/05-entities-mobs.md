@@ -851,6 +851,203 @@ authors: ['You']
 
 ---
 
+## 5.14 EQUIPMENT API
+
+`LivingEntity#getEquipment()` returns an `EntityEquipment` (or null for entities that
+don't wear gear, e.g. Slime). Mutate it through typed accessors:
+
+```java
+EntityEquipment eq = zombie.getEquipment();
+
+eq.setHelmet(new ItemStack(Material.NETHERITE_HELMET));
+eq.setChestplate(new ItemStack(Material.NETHERITE_CHESTPLATE));
+eq.setLeggings(null);
+eq.setBoots(null);
+eq.setItemInMainHand(new ItemStack(Material.NETHERITE_SWORD));
+eq.setItemInOffHand(new ItemStack(Material.SHIELD));
+
+// Drop chances control what falls on death (0.0 = never, 1.0 = always):
+eq.setHelmetDropChance(0f);
+eq.setItemInMainHandDropChance(0.5f);
+```
+
+For per-slot generic access:
+
+```java
+for (EquipmentSlot slot : EquipmentSlot.values()) {
+    eq.setItem(slot, items.get(slot));
+}
+```
+
+**Pitfall:** setting equipment after spawn is visible to clients only after the next
+entity-data tick. Set in the pre-spawn `Consumer` to ensure the entity *appears* armed
+on first render.
+
+References: [EntityEquipment Javadoc](https://jd.papermc.io/paper/1.21.4/org/bukkit/inventory/EntityEquipment.html).
+
+---
+
+## 5.15 DAMAGE API — `DamageSource` AND `EntityDamageEvent`
+
+In 1.20.4+ Paper exposes Mojang's `DamageSource` directly. Build sources for plugin-dealt
+damage so vanilla mechanics (knockback, tabs, death messages) work correctly.
+
+```java
+import io.papermc.paper.registry.RegistryKey;
+import io.papermc.paper.registry.RegistryAccess;
+import org.bukkit.damage.DamageType;
+import org.bukkit.damage.DamageSource;
+
+DamageType type = RegistryAccess.registryAccess()
+    .getRegistry(RegistryKey.DAMAGE_TYPE)
+    .get(NamespacedKey.minecraft("magic"));
+
+DamageSource src = DamageSource.builder(type)
+    .withCausingEntity(player)
+    .withDirectEntity(arrow)
+    .withDamageLocation(impactLoc)
+    .build();
+
+target.damage(8.0, src);
+```
+
+Listening to `EntityDamageEvent`:
+
+```java
+@EventHandler
+public void onDamage(EntityDamageEvent ev) {
+    DamageSource src = ev.getDamageSource();
+    DamageType   type = src.getDamageType();
+    Entity causer     = src.getCausingEntity();        // who started it
+    Entity direct     = src.getDirectEntity();         // arrow / fireball / null
+    Location loc      = src.getDamageLocation();       // for explosions, etc.
+
+    if (type.equals(DamageType.LAVA)) {
+        ev.setDamage(ev.getDamage() * 0.5);            // 50% lava damage
+    }
+}
+```
+
+`EntityDamageByEntityEvent` is a subclass when there's a direct entity attacker; prefer
+inspecting `DamageSource` for richer info.
+
+References: [Paper damage type registry](https://jd.papermc.io/paper/1.21.4/io/papermc/paper/registry/RegistryKey.html#DAMAGE_TYPE).
+
+---
+
+## 5.16 PROJECTILES
+
+### 5.16.1 Launching
+
+```java
+Arrow arrow = player.launchProjectile(Arrow.class);
+arrow.setDamage(12.0);
+arrow.setPickupStatus(AbstractArrow.PickupStatus.DISALLOWED);
+arrow.setCritical(true);
+arrow.setVelocity(player.getEyeLocation().getDirection().multiply(3.0));
+arrow.setShooter(player);
+```
+
+Or from a non-living spawner via `World#spawn`:
+
+```java
+Snowball ball = world.spawn(loc, Snowball.class, s -> {
+    s.setShooter(player);
+    s.setVelocity(direction.multiply(2.0));
+});
+```
+
+### 5.16.2 Custom on-hit behavior
+
+Listen for `ProjectileHitEvent`:
+
+```java
+@EventHandler
+public void onHit(ProjectileHitEvent ev) {
+    if (!(ev.getEntity() instanceof Snowball s)) return;
+    if (!(s.getShooter() instanceof Player p))   return;
+
+    // Custom snowball: AOE freeze
+    Block block = ev.getHitBlock();
+    if (block != null) {
+        for (Entity e : block.getWorld().getNearbyEntities(block.getLocation(), 4, 4, 4)) {
+            if (e instanceof LivingEntity le && !le.equals(p)) {
+                le.setFreezeTicks(200);
+            }
+        }
+    }
+}
+```
+
+### 5.16.3 Wind Charge (1.21+)
+
+```java
+WindCharge wc = world.spawn(loc, WindCharge.class, w -> {
+    w.setExplosionPower(2.0f);                      // larger AoE than vanilla 1.0
+    w.setVelocity(direction.multiply(1.5));
+});
+```
+
+---
+
+## 5.17 PASSENGER / VEHICLE API
+
+Stacking entities (riding, hat-stack, etc.):
+
+```java
+horse.addPassenger(player);                          // player rides horse
+horse.removePassenger(player);
+
+if (player.isInsideVehicle()) {
+    Entity v = player.getVehicle();
+    player.leaveVehicle();
+}
+
+List<Entity> stack = horse.getPassengers();
+```
+
+The relationship is **bidirectional**: `passenger.getVehicle() == horse` and
+`horse.getPassengers().contains(passenger)`.
+
+For multi-passenger boats (1.21+):
+
+```java
+ChestBoat boat = world.spawn(loc, ChestBoat.class);
+boat.addPassenger(player1);
+boat.addPassenger(player2);                          // boat allows 2 passengers
+```
+
+Events: `EntityMountEvent`, `EntityDismountEvent`, `VehicleEnterEvent`,
+`VehicleExitEvent`. Cancel any of them to prevent the action.
+
+---
+
+## 5.18 BRAIN API NOTE
+
+Some 1.20+ mobs (Villagers, Piglins, Allay, Warden, Camel) use a **Brain** instead of
+goal-based AI. The Brain system is NMS-only — Paper does not expose a public API for it.
+
+If you need to modify a Brain:
+
+```java
+// paperweight-userdev required
+import net.minecraft.world.entity.ai.Brain;
+import net.minecraft.world.entity.ai.memory.MemoryModuleType;
+
+ServerPlayer nms     = ((CraftPlayer) player).getHandle();
+LivingEntity nmsMob  = ((CraftLivingEntity) mob).getHandle();
+Brain<?> brain       = nmsMob.getBrain();
+brain.eraseMemory(MemoryModuleType.HOME);
+brain.setMemory(MemoryModuleType.HOME, GlobalPos.of(...));
+```
+
+This is fragile — Mojang refactors Brain internals every other release. If your mob
+choice has both `goalSelector` (Goals) and `brain`, the Goals are usually still respected
+and easier to use. Only touch Brain when there is no goal alternative (Villager work
+schedules, Allay collection, Warden anger).
+
+---
+
 ## 5.X SELF-REVIEW CHECKLIST
 
 - [x] Full entity hierarchy diagram with `instanceof` narrowing pattern
@@ -881,6 +1078,13 @@ authors: ['You']
 - [x] 14-row failure cookbook
 - [x] Performance notes (getEntities cost, display interpolation, PDC writes, MobGoals tick)
 - [x] Complete reference implementation (boss zombie with all patterns)
+- [x] Equipment API + drop chances + post-spawn timing pitfall
+- [x] DamageSource builder + DamageType registry
+- [x] EntityDamageEvent listener with rich DamageSource inspection
+- [x] Projectile launching (launchProjectile + spawn) + ProjectileHitEvent
+- [x] WindCharge 1.21 example
+- [x] Passenger / vehicle API + multi-passenger boats
+- [x] Brain API (NMS-only) caveat with Goals-vs-Brain guidance
 
 ---
 
