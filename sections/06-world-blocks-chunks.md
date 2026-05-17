@@ -858,6 +858,197 @@ working together.
 
 ---
 
+## 6.16 LOCATION / VECTOR / BOUNDING-BOX UTILITIES
+
+### 6.16.1 `Location` — world + (x,y,z) + yaw + pitch
+
+```java
+Location loc = new Location(world, 100.5, 64.0, 200.5, /* yaw */ 90f, /* pitch */ 0f);
+loc.add(1, 0, 0);                                  // mutates in place
+Location offset = loc.clone().add(0, 1, 0);        // immutable variant via clone
+
+Block b   = loc.getBlock();
+Vector v  = loc.toVector();                        // strip yaw/pitch
+Location centered = loc.toCenterLocation();        // x.5, y.5, z.5
+
+double dist  = loc.distance(other);                // sqrt — slow
+double dsq   = loc.distanceSquared(other);         // prefer for comparisons
+
+Vector dir = loc.getDirection();                   // unit vector from yaw/pitch
+```
+
+**Pitfall:** `Location` mutators (`add`, `subtract`, `setX`) modify the receiver. Always
+`.clone()` before mutating a Location you got from someone else's API.
+
+### 6.16.2 `Vector` — pure 3D math, no world
+
+```java
+Vector v = new Vector(1, 0, 0);
+v.normalize();
+v.multiply(2.5);
+v.add(new Vector(0, 1, 0));
+double len = v.length();
+double lensq = v.lengthSquared();
+
+// Rotate around Y axis by 30 degrees:
+v.rotateAroundY(Math.toRadians(30));
+```
+
+`Vector` is widely used for projectile velocity, knockback, particle direction. It has no
+world reference — combine with a `Location` only when you need positioning.
+
+### 6.16.3 `BoundingBox` — AABB queries
+
+```java
+BoundingBox box = BoundingBox.of(loc1, loc2).expand(2.0);
+boolean inside  = box.contains(player.getLocation().toVector());
+
+// Find entities in a box:
+Collection<Entity> hits = world.getNearbyEntities(box);
+
+// Block raycast through a box:
+RayTraceResult hit = world.rayTraceBlocks(start, direction, /* maxDistance */ 50);
+if (hit != null && hit.getHitBlock() != null) {
+    Block b = hit.getHitBlock();
+    BlockFace face = hit.getHitBlockFace();
+}
+```
+
+### 6.16.4 `World#rayTrace` — entity + block raycast
+
+```java
+RayTraceResult hit = world.rayTrace(
+    eyeLocation,
+    direction,
+    /* maxDistance */ 30,
+    FluidCollisionMode.NEVER,
+    /* ignorePassableBlocks */ true,
+    /* raySize */ 0.1,
+    /* entityFilter */ e -> e instanceof LivingEntity && !(e instanceof Player)
+);
+```
+
+Returns the first hit (block or entity). Useful for crosshair targeting, AOE origin, line
+of sight.
+
+---
+
+## 6.17 WORLD STATE — TIME, WEATHER, BORDER, GAMERULES
+
+```java
+// Time + weather
+long ticks = world.getTime();           // 0 .. 23999
+world.setTime(6000);                    // noon
+world.setStorm(true);
+world.setThundering(true);
+world.setWeatherDuration(20 * 60 * 5);  // 5 minutes
+
+// Game rules
+world.setGameRule(GameRule.DO_DAYLIGHT_CYCLE, false);
+world.setGameRule(GameRule.KEEP_INVENTORY, true);
+world.setGameRule(GameRule.MOB_GRIEFING, false);
+world.setGameRule(GameRule.RANDOM_TICK_SPEED, 6);
+
+// Spawn / difficulty / view distance
+world.setSpawnLocation(0, 80, 0);
+world.setDifficulty(Difficulty.HARD);
+world.setViewDistance(8);                          // per-world override (1.21+)
+world.setSimulationDistance(6);
+
+// World border
+WorldBorder border = world.getWorldBorder();
+border.setCenter(0, 0);
+border.setSize(2000);
+border.setSize(500, /* timeSec */ 60);             // shrink over 60s
+border.setWarningDistance(10);
+border.setDamageBuffer(2.0);
+border.setDamageAmount(0.5);
+```
+
+References: [Paper World Javadoc — game rules / weather / border](https://jd.papermc.io/paper/1.21.8/org/bukkit/World.html).
+
+---
+
+## 6.18 STRUCTURES — `StructureManager` + Schematics
+
+Paper exposes vanilla Structure-block snapshots (`.nbt`) via `StructureManager`:
+
+```java
+StructureManager sm = Bukkit.getStructureManager();
+
+// Load a structure from disk
+Structure s = sm.loadStructure(NamespacedKey.fromString("minecraft:village/plains/houses/plains_small_house_1"));
+
+// Place into the world:
+s.place(loc,
+    /* includeEntities */ true,
+    StructureRotation.CLOCKWISE_90,
+    Mirror.NONE,
+    /* palette */ 0,
+    /* integrity */ 1.0f,
+    new Random());
+
+// Capture an existing region:
+Structure capture = sm.createStructure();
+capture.fill(corner1, corner2, /* includeEntities */ false);
+sm.saveStructure(NamespacedKey.fromString("myplugin:my_arena"), capture);
+```
+
+For non-vanilla schematics (WorldEdit `.schem` / `.schematic`) use the WorldEdit API
+directly — Paper's Structure system reads only the vanilla NBT format.
+
+References: [Paper StructureManager docs](https://docs.papermc.io/paper/dev/structures/) (where available).
+
+---
+
+## 6.19 PARTICLES, SOUNDS, BLOCK EFFECTS
+
+### 6.19.1 Particles
+
+```java
+world.spawnParticle(Particle.FLAME, loc, /* count */ 20,
+    /* offsetX */ 0.5, /* offsetY */ 0.5, /* offsetZ */ 0.5,
+    /* extra */ 0.01,
+    /* data */ null);
+
+// Visible only to one player:
+player.spawnParticle(Particle.NOTE, loc, 1, 0, 0, 0, 1.0);
+
+// Dust with custom color:
+world.spawnParticle(Particle.DUST, loc, 1, 0, 0, 0, 0,
+    new Particle.DustOptions(Color.fromRGB(255, 0, 0), 1.0f));
+```
+
+Particles are client-side; spawning them async is unsafe (entity tracker). Always main
+or region scheduler.
+
+### 6.19.2 Sounds
+
+```java
+world.playSound(loc, Sound.BLOCK_ANVIL_LAND, 1.0f, 1.0f);
+world.playSound(loc, "minecraft:block.note_block.harp", SoundCategory.BLOCKS, 1.0f, 1.5f);
+
+// Play to a specific player only:
+player.playSound(loc, Sound.UI_TOAST_CHALLENGE_COMPLETE, 0.7f, 1.0f);
+```
+
+`SoundCategory` lets the user mute via slider settings — use `BLOCKS`, `MUSIC`,
+`HOSTILE`, etc. as appropriate.
+
+### 6.19.3 Block break / damage animation
+
+```java
+// Show fake break stage (0..9) to one player:
+player.sendBlockDamage(loc, /* progress 0.0..1.0 */ 0.5f);
+
+// Send a fake block change without altering server state:
+player.sendBlockChange(loc, Material.DIAMOND_BLOCK.createBlockData());
+```
+
+Useful for previews and ghost outlines.
+
+---
+
 ## 6.X SELF-REVIEW CHECKLIST
 
 - [x] Mental model — four block abstractions + decision tree
@@ -886,6 +1077,10 @@ working together.
 - [x] 16-row failure cookbook
 - [x] Performance notes
 - [x] Reference implementation (chunk claim plugin) tying everything together
+- [x] Location/Vector/BoundingBox utility coverage + raycasting
+- [x] World state — time, weather, gamerules, world border
+- [x] StructureManager + place/capture API
+- [x] Particles, sounds, fake block changes
 
 ---
 
